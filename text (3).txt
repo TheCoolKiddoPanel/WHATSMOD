@@ -1,0 +1,170 @@
+const { Client, LocalAuth } = require("whatsapp-web.js");
+const qrcode = require("qrcode-terminal");
+const fs = require("fs-extra");
+
+fs.ensureDirSync("./data");
+
+// ---------------- FILES ----------------
+const files = {
+ roles: "./data/roles.json",
+ mute: "./data/mute.json",
+ warnings: "./data/warnings.json",
+ spam: "./data/spam.json"
+};
+
+for (let k in files) {
+ if (!fs.existsSync(files[k])) fs.writeJsonSync(files[k], {});
+}
+
+const config = fs.readJsonSync("./config.json");
+
+// ---------------- LOAD DATA ----------------
+let roles = fs.readJsonSync(files.roles);
+let mute = fs.readJsonSync(files.mute);
+let warnings = fs.readJsonSync(files.warnings);
+let spam = fs.readJsonSync(files.spam);
+
+// ---------------- CLIENT ----------------
+const client = new Client({
+ authStrategy: new LocalAuth(),
+ puppeteer: {
+  headless: true,
+  executablePath: "/usr/bin/chromium",
+  args: ["--no-sandbox", "--disable-setuid-sandbox"]
+ }
+});
+
+// ---------------- ROLE SYSTEM ----------------
+function role(u) {
+ return roles[u] || "user";
+}
+
+function lvl(r) {
+ return { user: 0, admin: 1, owner: 2 }[r] || 0;
+}
+
+function has(u, need) {
+ return lvl(role(u)) >= lvl(need);
+}
+
+function can(actor, target) {
+ if (!target) return false;
+ if (role(target) === "owner") return false;
+ return lvl(role(actor)) > lvl(role(target));
+}
+
+function save(file, data) {
+ fs.writeJsonSync(file, data);
+}
+
+// ---------------- START ----------------
+client.on("qr", qr => qrcode.generate(qr, { small: true }));
+client.on("ready", () => console.log("BOT ONLINE"));
+
+// ---------------- MESSAGE ----------------
+client.on("message", async m => {
+ try {
+
+  if (!m.body) return;
+
+  const chat = await m.getChat();
+  if (!chat.isGroup) return;
+
+  const u = m.author || m.from;
+
+  // ---------------- MUTE ----------------
+  if (mute[u] && Date.now() < mute[u]) {
+   await m.delete(true);
+   return;
+  }
+
+  // ---------------- PREFIX CHECK ----------------
+  if (!m.body.startsWith(config.prefix)) return;
+
+  const args = m.body.slice(config.prefix.length).trim().split(" ");
+  const cmd = args.shift().toLowerCase();
+
+  // ---------------- ROLE ----------------
+  if (cmd === "role") {
+   return m.reply("Your role: " + role(u));
+  }
+
+  // ---------------- SET ROLE ----------------
+  if (cmd === "setrole") {
+   if (!has(u, "owner")) return;
+
+   const t = m.mentionedIds[0];
+   const r = args[0];
+
+   if (!t || !r) return m.reply("!setrole @user role");
+
+   roles[t] = r;
+   save(files.roles, roles);
+
+   return chat.sendMessage("✅ role set: " + r);
+  }
+
+  // ---------------- PROMOTE ----------------
+  if (cmd === "promote") {
+   if (!has(u, "admin")) return;
+
+   const t = m.mentionedIds[0];
+   if (!t || !can(u, t)) return;
+
+   roles[t] = "admin";
+   save(files.roles, roles);
+
+   await chat.promoteParticipants([t]);
+   return chat.sendMessage("⬆️ promoted");
+  }
+
+  // ---------------- DEMOTE ----------------
+  if (cmd === "demote") {
+   if (!has(u, "admin")) return;
+
+   const t = m.mentionedIds[0];
+   if (!t || !can(u, t)) return;
+
+   roles[t] = "user";
+   save(files.roles, roles);
+
+   await chat.demoteParticipants([t]);
+   return chat.sendMessage("⬇️ demoted");
+  }
+
+  // ---------------- KICK ----------------
+  if (cmd === "kick") {
+   if (!has(u, "admin")) return;
+
+   const t = m.mentionedIds[0];
+   if (!t || !can(u, t)) return;
+
+   await chat.removeParticipants([t]);
+   return chat.sendMessage("👢 kicked");
+  }
+
+  // ---------------- MUTE ----------------
+  if (cmd === "mute") {
+   if (!has(u, "admin")) return;
+
+   const t = m.mentionedIds[0];
+   if (!t) return;
+
+   mute[t] = Date.now() + (config.muteTime || 60000);
+   save(files.mute, mute);
+
+   return chat.sendMessage("🔇 muted");
+  }
+
+  // ---------------- ROLE CHECK ----------------
+  if (cmd === "rolecheck") {
+   return m.reply(role(u));
+  }
+
+ } catch (e) {
+  console.log("ERROR:", e);
+ }
+});
+
+// ---------------- START BOT ----------------
+client.initialize();
